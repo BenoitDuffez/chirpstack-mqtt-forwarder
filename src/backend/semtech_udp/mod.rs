@@ -350,15 +350,6 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
         pl.random_token, remote
     );
 
-    info!(
-        "Sending PUSH_ACK, random_token: {} remote: {}",
-        pl.random_token, remote
-    );
-    let ack = structs::PushAck {
-        random_token: pl.random_token,
-    };
-    state.socket.send_to(&ack.to_vec(), remote).await?;
-
     let uplink_frames = pl.to_proto_uplink_frames(state.time_fallback_enabled)?;
     let gateway_stats = pl.to_proto_gateway_stats()?;
 
@@ -386,6 +377,17 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
             );
         }
     }
+
+    // Acknowledge only once the uplinks are queued for publishing. If they could not be
+    // queued (e.g. the publish channel is full), the packet-forwarder keeps and retries them.
+    info!(
+        "Sending PUSH_ACK, random_token: {} remote: {}",
+        pl.random_token, remote
+    );
+    let ack = structs::PushAck {
+        random_token: pl.random_token,
+    };
+    state.socket.send_to(&ack.to_vec(), remote).await?;
 
     if let Some(mut stats) = gateway_stats {
         let s = state.export_stats().await?;
