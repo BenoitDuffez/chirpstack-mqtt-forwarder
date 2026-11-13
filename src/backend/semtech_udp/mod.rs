@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use super::Backend as BackendTrait;
 use crate::config::Configuration;
 use crate::metadata;
-use crate::mqtt::{send_gateway_stats, send_tx_ack, send_uplink_frame};
+use crate::mqtt::{send_gateway_stats, send_tx_ack, send_uplink_frames};
 
 mod structs;
 
@@ -353,6 +353,7 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
     let uplink_frames = pl.to_proto_uplink_frames(state.time_fallback_enabled)?;
     let gateway_stats = pl.to_proto_gateway_stats()?;
 
+    let mut to_send = Vec::with_capacity(uplink_frames.len());
     for uf in &uplink_frames {
         if let Some(rx_info) = &uf.rx_info
             && !((rx_info.crc_status() == gw::CrcStatus::CrcOk && state.forward_crc_ok)
@@ -368,14 +369,18 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
         }
 
         if lrwn_filters::matches(&uf.phy_payload, &state.filters) {
-            state.count_uplink(uf).await?;
-            send_uplink_frame(uf).await?;
+            to_send.push(uf);
         } else {
             debug!(
                 "Ignoring uplink frame because of dev_addr and join_eui filters, uplink_id: {}",
                 uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
             );
         }
+    }
+
+    send_uplink_frames(&to_send).await?;
+    for uf in to_send {
+        state.count_uplink(uf).await?;
     }
 
     // Acknowledge only once the uplinks are queued for publishing. If they could not be

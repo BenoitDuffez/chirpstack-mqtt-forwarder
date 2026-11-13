@@ -346,6 +346,44 @@ pub async fn run(conf: &Configuration, mut terminate_rx: broadcast::Receiver<()>
 }
 
 pub async fn send_uplink_frame(pl: &gw::UplinkFrame) -> Result<()> {
+    let msg = uplink_message(pl)?;
+
+    PUB_CHANNEL_TX
+        .get()
+        .ok_or_else(|| anyhow!("PUB_CHANNEL_TX is None"))?
+        .try_send(msg)?;
+
+    Ok(())
+}
+
+// Queue all the uplink frames, or none of them when the publish channel can't take them all, so
+// that a packet-forwarder retrying the unacknowledged frames doesn't get the queued ones published twice.
+pub async fn send_uplink_frames(pls: &[&gw::UplinkFrame]) -> Result<()> {
+    let tx = PUB_CHANNEL_TX
+        .get()
+        .ok_or_else(|| anyhow!("PUB_CHANNEL_TX is None"))?;
+
+    // More frames than the channel can hold can never be reserved at once.
+    if pls.len() > tx.max_capacity() {
+        for pl in pls {
+            send_uplink_frame(pl).await?;
+        }
+        return Ok(());
+    }
+
+    let msgs = pls
+        .iter()
+        .map(|pl| uplink_message(pl))
+        .collect::<Result<Vec<_>>>()?;
+    let permits = tx.try_reserve_many(msgs.len())?;
+    for (msg, permit) in msgs.into_iter().zip(permits) {
+        permit.send(msg);
+    }
+
+    Ok(())
+}
+
+fn uplink_message(pl: &gw::UplinkFrame) -> Result<MqttMessage> {
     let b = match JSON.load(Ordering::Relaxed) {
         true => serde_json::to_vec(&pl)?,
         false => pl.encode_to_vec(),
@@ -356,15 +394,10 @@ pub async fn send_uplink_frame(pl: &gw::UplinkFrame) -> Result<()> {
         pl.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default(),
     );
 
-    PUB_CHANNEL_TX
-        .get()
-        .ok_or_else(|| anyhow!("PUB_CHANNEL_TX is None"))?
-        .try_send(MqttMessage {
-            typ: "up".into(),
-            bytes: b,
-        })?;
-
-    Ok(())
+    Ok(MqttMessage {
+        typ: "up".into(),
+        bytes: b,
+    })
 }
 
 pub async fn send_gateway_stats(pl: &gw::GatewayStats) -> Result<()> {
